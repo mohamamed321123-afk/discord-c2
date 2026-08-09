@@ -805,7 +805,7 @@ func handler(s *discordgo.Session, m *discordgo.MessageCreate) {
 }
 
 func main() {
-	botToken := os.Getenv("DISCORD_BOT_TOKEN")
+	botToken := os.Getenv("MTUzNTgyMzY0MjcxMjA4MDQyNQ.G6WbGf.HSB76VgOf1R4sEm5DXao14BnuuBw--LK4V8Ufs")
 	if botToken == "" {
 		fmt.Println("Error: DISCORD_BOT_TOKEN environment variable not set")
 		return
@@ -826,7 +826,7 @@ func main() {
 		return
 	}
 
-	guildID := os.Getenv("DISCORD_GUILD_ID")
+	guildID := os.Getenv("1507541309492297818")
 	if guildID == "" {
 		fmt.Println("Error: DISCORD_GUILD_ID environment variable not set")
 		dg.Close()
